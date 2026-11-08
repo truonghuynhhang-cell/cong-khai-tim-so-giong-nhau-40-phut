@@ -1,0 +1,277 @@
+name: Generate number-pair video
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: number-pair-video-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      PRIVATE_REPO: "aisenbergdarfus97225-eng/tim-3-diem-khac"
+      PRIVATE_REF: "main"
+      PYTHONUNBUFFERED: "1"
+      RUNNER_CONTROL_DIR: "${{ github.workspace }}/runner-control"
+      # Edit these YAML values directly; the Run workflow form has no inputs.
+      VIDEO_COUNT: "1"       # Number of videos to produce in this workflow run.
+      GAMES_PER_VIDEO: "2"  # Number of puzzle games inside EACH video; allowed range 1-30.
+      VIDEO_SEED: ""         # Leave blank for a random seed; set an integer to reproduce a run.
+      YT_PRIVACY_STATUS: "private"  # private, unlisted, or public.
+      YT_UPLOAD_ENABLED: "true"     # Set false to generate video/thumbs without uploading.
+
+    steps:
+      - name: Checkout public control repo
+        uses: actions/checkout@v4
+        with:
+          path: runner-control
+          fetch-depth: 0
+
+      - name: Check private checkout token
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          if [ -z "$PRIVATE_REPO_TOKEN" ]; then
+            echo "::error::Add PRIVATE_REPO_TOKEN to the public repository secrets."
+            exit 1
+          fi
+
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ env.PRIVATE_REF }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private-source
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Select next public title
+        working-directory: .
+        run: |
+          python - <<'PYCODE'
+          import os
+          from pathlib import Path
+
+          control = Path("runner-control")
+          catalog = control / "extra-titles.txt"
+          usage = control / "title-usage.txt"
+          titles = [
+              line.strip()
+              for line in catalog.read_text(encoding="utf-8").splitlines()
+              if line.strip() and not line.lstrip().startswith("#")
+          ]
+          used = {
+              line.strip()
+              for line in usage.read_text(encoding="utf-8").splitlines()
+              if line.strip()
+          }
+          start = 1
+          selected = next(
+              ((idx, title) for idx, title in enumerate(titles[start - 1:], start)
+               if title not in used),
+              None,
+          )
+          if selected is None:
+              raise SystemExit("No unused public title remains.")
+          idx, title = selected
+          Path("private-source/tieude.txt").write_text(title + "\n", encoding="utf-8")
+          (control / ".selected-title.txt").write_text(title + "\n", encoding="utf-8")
+          print(f"[title] index={idx}/{len(titles)}")
+          print(f"[title] {title}")
+          PYCODE
+
+      - name: Use public YouTube description
+        run: cp runner-control/mota.txt private-source/mota.txt
+
+      - name: Validate number-pair private source
+        run: |
+          cd private-source
+          test -f generate_video.py
+          test -f puzzle_engine.py
+          test -f video_renderer.py
+          test -f config.json
+          test -f requirements.txt
+          test -f history/puzzles.jsonl
+          test -f history/videos.jsonl
+          test -f assets/fonts/ipaexg.ttf
+          test -f assets/mascot/fox-sheet.webp
+          if [ -f images/videonen.mp4 ]; then
+            echo "Using fallback background: images/videonen.mp4"
+          else
+            for i in $(seq 1 10); do
+              if [ ! -f "images/$i.mp4" ]; then
+                echo "::error::Missing background asset: images/$i.mp4 (or images/videonen.mp4 fallback)"
+                exit 1
+              fi
+            done
+          fi
+          test -f thumb/kieuthumb1.png
+          test -f thumb/kieuthumb2.png
+          for i in $(seq 1 10); do test -f "music/$i.mp3"; done
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime
+        working-directory: private-source
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install requests
+
+      - name: Validate project
+        working-directory: private-source
+        run: python tools/check_project.py
+
+      - name: Validate video and game counts
+        run: |
+          if ! [[ "$VIDEO_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::VIDEO_COUNT must be a positive integer in this workflow YAML."
+            exit 1
+          fi
+          if ! [[ "$GAMES_PER_VIDEO" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::GAMES_PER_VIDEO must be an integer from 1 to 30."
+            exit 1
+          fi
+          if (( GAMES_PER_VIDEO > 30 )); then
+            echo "::error::GAMES_PER_VIDEO cannot exceed 30."
+            exit 1
+          fi
+          if [[ "$YT_PRIVACY_STATUS" != "private" && "$YT_PRIVACY_STATUS" != "unlisted" && "$YT_PRIVACY_STATUS" != "public" ]]; then
+            echo "::error::YT_PRIVACY_STATUS must be private, unlisted, or public."
+            exit 1
+          fi
+
+      - name: Generate number-pair videos
+        working-directory: private-source
+        run: |
+          args=(--videos "$VIDEO_COUNT" --games "$GAMES_PER_VIDEO")
+          if [ -n "$VIDEO_SEED" ]; then
+            args+=(--seed "$VIDEO_SEED")
+          fi
+          python generate_video.py "${args[@]}"
+
+      - name: Commit private generation history
+        working-directory: private-source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add history/puzzles.jsonl history/videos.jsonl
+          if git diff --cached --quiet; then
+            echo "No private history changes."
+            exit 0
+          fi
+          git commit -m "Update number-pair generation history [skip ci]"
+          git push origin HEAD:main
+
+      - name: Upload videos to YouTube
+        if: env.YT_UPLOAD_ENABLED == 'true'
+        working-directory: private-source
+        env:
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+        run: |
+          python - <<'PYCODE'
+          import json
+          import os
+          from pathlib import Path
+          import requests
+
+          client_id = os.environ["YT_CLIENT_ID"].strip()
+          client_secret = os.environ["YT_CLIENT_SECRET"].strip()
+          refresh = os.environ["YT_REFRESH_TOKEN"].strip()
+          if not all((client_id, client_secret, refresh)):
+              raise SystemExit("Missing YouTube OAuth secrets")
+
+          token = requests.post(
+              "https://oauth2.googleapis.com/token",
+              data={
+                  "client_id": client_id,
+                  "client_secret": client_secret,
+                  "refresh_token": refresh,
+                  "grant_type": "refresh_token",
+              },
+              timeout=60,
+          )
+          token.raise_for_status()
+          access_token = token.json()["access_token"]
+          headers = {"Authorization": f"Bearer {access_token}"}
+
+          for manifest in sorted(Path("dist").glob("numbers-pair-*.json")):
+              data = json.loads(manifest.read_text(encoding="utf-8"))
+              video = manifest.with_suffix(".mp4")
+              thumbnail = manifest.with_name(manifest.stem + "-thumbnail.jpg")
+              metadata = {
+                  "snippet": {
+                      "title": str(data["title"])[:100],
+                      "description": Path("mota.txt").read_text(encoding="utf-8")[:5000],
+                      "categoryId": "24",
+                  },
+                  "status": {
+                      "privacyStatus": os.environ["YT_PRIVACY_STATUS"],
+                      "selfDeclaredMadeForKids": False,
+                  },
+              }
+              init = requests.post(
+                  "https://www.googleapis.com/upload/youtube/v3/videos",
+                  params={"uploadType": "resumable", "part": "snippet,status"},
+                  headers={
+                      **headers,
+                      "Content-Type": "application/json; charset=UTF-8",
+                      "X-Upload-Content-Type": "video/mp4",
+                      "X-Upload-Content-Length": str(video.stat().st_size),
+                  },
+                  json=metadata,
+                  timeout=60,
+              )
+              init.raise_for_status()
+              location = init.headers["Location"]
+              with video.open("rb") as handle:
+                  upload = requests.put(
+                      location,
+                      headers={"Content-Type": "video/mp4", "Content-Length": str(video.stat().st_size)},
+                      data=handle,
+                      timeout=3600,
+                  )
+              upload.raise_for_status()
+              video_id = upload.json()["id"]
+              with thumbnail.open("rb") as handle:
+                  thumb = requests.post(
+                      "https://www.googleapis.com/upload/youtube/v3/thumbnails/set",
+                      params={"videoId": video_id, "uploadType": "multipart"},
+                      headers=headers,
+                      files={"media": ("thumbnail.jpg", handle, "image/jpeg")},
+                      timeout=180,
+                  )
+              thumb.raise_for_status()
+              print(f"[youtube] https://youtu.be/{video_id}")
+          PYCODE
+
+
+      - name: Commit used public title
+        working-directory: runner-control
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          selected_title="$(cat .selected-title.txt)"
+          grep -Fxq "$selected_title" title-usage.txt || printf '%s\n' "$selected_title" >> title-usage.txt
+          rm -f .selected-title.txt
+          git add title-usage.txt
+          if git diff --cached --quiet; then
+            echo "No public title usage change."
+            exit 0
+          fi
+          git commit -m "Update used title history [skip ci]"
+          git push origin HEAD:main
+
