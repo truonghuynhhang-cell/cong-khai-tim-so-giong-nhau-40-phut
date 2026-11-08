@@ -15,15 +15,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
-      PRIVATE_REPO: "aisenbergdarfus97225-eng/tim-3-diem-khac"
+      PRIVATE_REPO: "truonghuynhhang-cell/tim-so-giong-nhau-40-phut"
       PRIVATE_REF: "main"
       PYTHONUNBUFFERED: "1"
       RUNNER_CONTROL_DIR: "${{ github.workspace }}/runner-control"
       # Edit these YAML values directly; the Run workflow form has no inputs.
       VIDEO_COUNT: "1"       # Number of videos to produce in this workflow run.
-      GAMES_PER_VIDEO: "2"  # Number of puzzle games inside EACH video; allowed range 1-30.
+      GAMES_PER_VIDEO: "30"  # Number of puzzle games inside EACH video; allowed range 1-30.
       VIDEO_SEED: ""         # Leave blank for a random seed; set an integer to reproduce a run.
-      YT_PRIVACY_STATUS: "private"  # private, unlisted, or public.
+      YT_PRIVACY_STATUS: "public"  # private, unlisted, or public.
       YT_UPLOAD_ENABLED: "true"     # Set false to generate video/thumbs without uploading.
 
     steps:
